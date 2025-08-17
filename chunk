@@ -1,0 +1,181 @@
+from tree_sitter import Language, Parser
+from tree_sitter_languages import get_parser
+import pathlib, json
+import os
+import re
+import json
+import shutil
+
+#### CONFIG
+INPUT_FILE = "DemoApplication.java"
+OUTPUT_DIR = "chunks"
+METADATA_FILE = "chunks_metadata.json"
+MAX_CHARS = 3000
+
+#### JAVA grammer
+# JAVA_LANG = get_parser("java")
+
+#### Tree sitter setup
+#parser = Parser()
+#parser = get_parser("java")
+
+######## Func1 : clean java code. Java file contains special charactersm symbols, clean it before we process it
+def clean_java_source(code: str) -> str:
+    # remove control characters except \t,\n\r
+    code =  re.sub(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]","", code)
+    # remove byte order mark (BOM)
+    code = code.replace("\ufeff","")
+    # replace non ASCII with underscore
+    code = re.sub(r"[^\x00-\x7F]+","_", code)
+    return code
+
+######## Func2 : make chunk file name safer for windows
+def safe_filename(name: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]', '_', name)
+
+######## Func3 : read and clean large java files
+def read_java_file(path): 
+    with open(path, "r", encoding = "utf-8", errors = "ignore") as f:
+        raw_code = f.read()
+    return clean_java_source(raw_code) 
+
+
+######## Func4 : extract calls within methods
+
+def extract_calls(node, code):
+    "recursively find all method calls inside a node"
+    calls = []
+    if node.type == "method_invocation":
+        call_text = code[node.start_byte:node.end_byte]
+        calls.append(call_text)
+
+    for child in node.children:
+        calls.extend(extract_calls(child, code))
+
+    return calls
+
+######## Func5 : extract chunks metadata, and append it to code_metadata in key value format
+def extract_code_metadata(cleaned_code):    
+    # parser = Parser()
+    parser = get_parser("java")
+    tree = parser.parse(cleaned_code.encode("utf-8"))
+    root = tree.root_node
+    code_metadata = []
+
+    imports = []
+    for child in root.children:
+        if child.type == 'import_declaration':
+            imp_text = cleaned_code[child.start_byte:child.end_byte].strip()
+            imports.append(imp_text.replace("import","").rstrip(";"))
+
+    def walk(node, parent_class = None):
+        if node.type in ("class_declaration","interface_declaration", "enum_declaration"):
+            name_node = node.child_by_field_name("name")
+            name =  cleaned_code[name_node.start_byte:name_node.end_byte]
+
+            ## extract dependencies
+            extends_node =  node.child_by_field_name("superclass")
+            implements_node = node.child_by_field_name("super_interfaces")
+            extends = None
+            implements = []
+
+            if extends_node:
+                extends = cleaned_code[extends_node.start_byte:extends_node.end_byte]
+            if implements_node:
+                implements = [
+                    cleaned_code[c.start_byte:c.end_byte]
+                    for c in implements_node.children
+                    if c.type == "type_identifier"
+                ]
+
+
+            code_metadata.append({
+                "type" : node.type,
+                "name" : name,
+                "start" : node.start_point[0],
+                "end" : node.end_point[0],
+                "parent_class" : parent_class,
+                "dependencies" : {
+                    #"imports" : imports,
+                    "extends" : extends,
+                    "implements" : implements
+                }
+            })
+            new_parent_class = name
+
+        else:
+            new_parent_class = parent_class
+
+        if node.type in ("method_declaration", "constructor_delcaration"):
+            name_node = node.child_by_field_name("name")
+            name = cleaned_code[name_node.start_byte:name_node.end_byte]
+            calls = extract_calls(node, cleaned_code)
+            code_metadata.append({
+                "type" : node.type,
+                "name" : name,
+                "start" : node.start_point[0],
+                "end" : node.end_point[0],
+                "parent_class" : parent_class,
+                "dependencies" : {
+                    #"imports" : imports,
+                    #"calls" : calls
+                }
+            })
+
+        for child in node.children:
+            walk(child, parent_class = new_parent_class)
+    walk(root)
+    return code_metadata
+
+
+def save_chunks(code, output_dir):
+    code_metadata = extract_code_metadata(code)
+    code = code.splitlines()
+    os.makedirs(output_dir, exist_ok = True)
+    final_metadata = []
+    global chunk_counter
+    chunk_counter = 0
+
+    for metadata in code_metadata:
+        print(f"metadata {metadata}")
+        start_line = metadata["start"]
+        end_line = metadata["end"]
+        #print(f"start_line: {start_line}")
+        snippet= "\n".join(code[start_line:end_line+1])
+        #snippet = " 123"
+        chunk_counter += 1
+        if metadata["parent_class"]:
+            chunk_name = f"{chunk_counter:03d}_{safe_filename(metadata['parent_class'])}.{safe_filename(metadata['name'])}.java"
+        else:
+            chunk_name = f"{chunk_counter:03d}_{safe_filename(metadata['name'])}.java"
+
+        out_path = os.path.join(output_dir, chunk_name)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(snippet)
+        print(f"File saved: {out_path}")     
+
+        final_metadata.append({
+            "chunk_name" : chunk_name,
+            "type" : metadata["type"],
+            "name" : metadata["name"],
+            "start" : metadata["start"],
+            "end" : metadata["end"],
+            "parent_class" : metadata["parent_class"],
+            "lines": len(snippet.splitlines()),
+            "size_chars" : len(snippet)
+            #"dependencies" : metadata["dependencies"]
+        })
+
+    with open(METADATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(final_metadata, f, indent=2)
+    
+    print(f"Extracted {len(final_metadata)} chunk parts to {OUTPUT_DIR}")
+    print(f"Metadata saved to {METADATA_FILE}")
+
+if __name__ == "__main__":    
+##### read file :
+    code = read_java_file(INPUT_FILE) 
+    if os.path.exists(OUTPUT_DIR):
+        shutil.rmtree(OUTPUT_DIR)
+    # tree = parser.parse(code.encode("utf-8")) 
+    save_chunks(code, OUTPUT_DIR)
