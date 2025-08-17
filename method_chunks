@@ -1,0 +1,60 @@
+def extract_methods_with_details(code, root):
+    method_chunks = []
+
+    def walk(node, parent_class=None):
+        if node.type in ("method_declaration", "constructor_declaration"):
+            name_node = node.child_by_field_name("name")
+            name = code[name_node.start_byte:name_node.end_byte] if name_node else None
+
+            # Return type (only for methods)
+            return_type = None
+            if node.type == "method_declaration":
+                rt_node = node.child_by_field_name("type")
+                if rt_node:
+                    return_type = code[rt_node.start_byte:rt_node.end_byte]
+
+            # Parameters
+            params = None
+            param_node = node.child_by_field_name("parameters")
+            if param_node:
+                params = code[param_node.start_byte:param_node.end_byte]
+
+            # Modifiers
+            modifiers = []
+            for child in node.children:
+                if child.type == "modifiers":
+                    modifiers = [code[m.start_byte:m.end_byte] for m in child.children]
+
+            # Annotations
+            annotations = [
+                code[c.start_byte:c.end_byte]
+                for c in node.children if c.type == "annotation"
+            ]
+
+            # Body (range + code)
+            body_code, body_range = None, None
+            body_node = node.child_by_field_name("body")
+            if body_node:
+                body_code = code[body_node.start_byte:body_node.end_byte]
+                body_range = (body_node.start_point, body_node.end_point)
+
+            method_chunks.append({
+                "type": node.type,
+                "name": name,
+                "return_type": return_type,
+                "parameters": params,
+                "modifiers": modifiers,
+                "annotations": annotations,
+                "body_code": body_code,
+                "body_range": body_range,
+                "start": node.start_point,
+                "end": node.end_point,
+                "parent_class": parent_class
+            })
+
+        # Recurse into children
+        for child in node.children:
+            walk(child, parent_class=parent_class)
+
+    walk(root)
+    return method_chunks
