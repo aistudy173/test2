@@ -1,0 +1,162 @@
+
+
+
+---
+
+# LangGraph Implementation (runnable skeleton)
+
+> This is a minimal but complete graph. Replace `call_llm()` and storage with your choices.  
+
+```python
+# pip install langgraph langchain pydantic javalang faiss-cpu chromadb (as needed)
+
+from langgraph.graph import StateGraph, END
+from typing import Dict, Any, List
+import javalang
+import os, json, re, glob
+from pydantic import BaseModel
+from pathlib import Path
+
+# ---------- Utility: LLM & Embeddings (placeholders) ----------
+def call_llm(messages: List[Dict[str, str]], model: str = "gpt-4.1", temperature: float = 0.2) -> str:
+    """
+    Swap with your provider's ChatCompletion call.
+    messages: [{"role": "system"/"user"/"assistant", "content": "..."}]
+    Return string content.
+    """
+    raise NotImplementedError("Wire this to your LLM provider.")
+
+def parse_json_safe(s: str) -> Dict[str, Any]:
+    try:
+        return json.loads(s)
+    except Exception:
+        return {}
+
+# ---------- State model ----------
+from typing import Optional
+class MethodDoc(BaseModel):
+    fqcn: str
+    method: str
+    signature: str
+    source_path: str
+    javadoc: Optional[str] = None
+    doc_md: Optional[str] = None
+    eval_scores: Optional[Dict[str, float]] = None
+    eval_feedback: Optional[str] = None
+    attempts: int = 0
+
+class PipelineState(BaseModel):
+    repo_path: str
+    commit_sha: Optional[str] = None
+    classes: List[Dict[str, Any]] = []
+    methods: List[MethodDoc] = []
+    vector_index_uri: Optional[str] = None
+    global_eval: Optional[Dict[str, float]] = None
+    published_paths: List[str] = []
+
+# ---------- Node 1: Ingest & Parse ----------
+def ingest_parse(state: PipelineState) -> PipelineState:
+    repo = Path(state.repo_path)
+    java_files = [str(p) for p in repo.rglob("*.java") if "target" not in str(p)]
+    methods: List[MethodDoc] = []
+
+    for f in java_files:
+        try:
+            src = Path(f).read_text(encoding="utf-8", errors="ignore")
+            tree = javalang.parse.parse(src)
+            package = tree.package.name if tree.package else None
+            for path, node in tree.filter(javalang.tree.ClassDeclaration):
+                fqcn = f"{package}.{node.name}" if package else node.name
+                for m in node.methods:
+                    signature = f"public {m.return_type.name if m.return_type else 'void'} {m.name}({', '.join([p.type.name for p in m.parameters])})"
+                    # naive javadoc extraction (improve with a real parser)
+                    javadoc_match = re.search(r"/\*\*((?:.|\n)*?)\*/\s*[^;{]*\b" + re.escape(m.name) + r"\s*\(", src, re.MULTILINE)
+                    javadoc = javadoc_match.group(1).strip() if javadoc_match else None
+
+                    methods.append(MethodDoc(
+                        fqcn=fqcn,
+                        method=m.name,
+                        signature=signature,
+                        source_path=f,
+                        javadoc=javadoc
+                    ))
+        except Exception:
+            continue
+
+    state.methods = methods
+    return state
+
+# ---------- Node 2: Chunk & Context (optional enrichment) ----------
+def chunk_and_context(state: PipelineState) -> PipelineState:
+    # placeholder: you could embed code regions, collect imports, called methods, annotations
+    # For now, skip to keep the skeleton simple.
+    return state
+
+# ---------- Node 3: Doc Generator ----------
+DOC_SYS = """You are a senior Java developer and technical writer. Generate precise, implementation-grounded documentation. Rules:
+- Never fabricate behavior not evidenced by code/javadoc.
+- Document parameters, return values, exceptions, side effects, thread-safety, nullability.
+- Mention edge cases if inferable.
+- Use Markdown.
+"""
+
+DOC_USER_TMPL = """Code (signature):
+{signature}
+
+Class: {fqcn}
+Source path: {source_path}
+
+Javadoc (if any):
+{javadoc}
+
+Relevant context:
+{context}
+
+Produce Markdown with this structure:
+
+### {method}
+**Signature**
+`{signature}`
+
+**Summary**
+...
+
+**Parameters**
+- `name` (type): description
+
+**Returns**
+...
+
+**Throws**
+...
+
+**Details**
+- Behavior:
+- Preconditions:
+- Postconditions:
+- Thread-safety:
+- Performance notes:
+
+**Examples**
+```java
+
+
+
+def doc_generator(state: PipelineState) -> PipelineState:
+for i, md in enumerate(state.methods):
+if md.doc_md:
+continue
+msgs = [
+{"role": "system", "content": DOC_SYS},
+{"role": "user", "content": DOC_USER_TMPL.format(
+signature=md.signature,
+fqcn=md.fqcn,
+source_path=md.source_path,
+javadoc=md.javadoc or "(none)",
+context="(not provided in skeleton)",
+method=md.method
+)}
+]
+content = call_llm(msgs, temperature=0.2)
+state.methods[i].doc_md = content
+return state
