@@ -1,0 +1,80 @@
+chunk_and_context
+
+import javalang
+import re
+from pathlib import Path
+
+def chunk_and_context(state: PipelineState) -> PipelineState:
+    class_chunks, method_chunks = [], []
+
+    for f in Path(state.repo_path).rglob("*.java"):
+        src = Path(f).read_text(encoding="utf-8", errors="ignore")
+
+        try:
+            tree = javalang.parse.parse(src)
+        except Exception as e:
+            print(f"Failed to parse {f}: {e}")
+            continue
+
+        package = tree.package.name if tree.package else None
+
+        for type_decl in tree.types:
+            if isinstance(type_decl, javalang.tree.ClassDeclaration):
+                fqcn = f"{package}.{type_decl.name}" if package else type_decl.name
+
+                # --- Class chunk (no method code here) ---
+                class_chunks.append({
+                    "type": "class",
+                    "fqcn": fqcn,
+                    "annotations": [a.name for a in type_decl.annotations],
+                    "fields": [f.declarators[0].name for f in type_decl.fields],
+                    "methods": [m.name for m in type_decl.methods],
+                    "source_path": str(f)
+                })
+
+                # --- Method chunks (with method code body) ---
+                for m in type_decl.methods:
+                    # Signature
+                    signature = f"public {m.return_type.name if m.return_type else 'void'} {m.name}({', '.join([p.type.name for p in m.parameters])})"
+
+                    # Extract Javadoc (regex look-behind before method declaration)
+                    javadoc_match = re.search(
+                        r"/\*\*((?:.|\n)*?)\*/\s*[^;{]*\b" + re.escape(m.name) + r"\s*\(",
+                        src,
+                        re.MULTILINE
+                    )
+                    javadoc = javadoc_match.group(1).strip() if javadoc_match else None
+
+                    # Extract method body (naive: find { ... } after method signature)
+                    method_body = None
+                    sig_pattern = re.escape(m.name) + r"\s*\(.*?\)\s*\{"
+                    sig_match = re.search(sig_pattern, src, re.DOTALL)
+                    if sig_match:
+                        start_idx = sig_match.start()
+                        # Balance braces to extract body
+                        brace_count, i = 0, sig_match.end() - 1
+                        while i < len(src):
+                            if src[i] == "{":
+                                brace_count += 1
+                            elif src[i] == "}":
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    method_body = src[sig_match.end():i].strip()
+                                    break
+                            i += 1
+
+                    method_chunks.append({
+                        "type": "method",
+                        "fqcn": fqcn,
+                        "method": m.name,
+                        "signature": signature,
+                        "javadoc": javadoc,
+                        "params": [p.type.name for p in m.parameters],
+                        "body": method_body,
+                        "source_path": str(f)
+                    })
+
+    # Save to pipeline state
+    state.classes = [ClassDoc(**c) for c in class_chunks]
+    state.methods = [MethodDoc(**m) for m in method_chunks]
+    return state
