@@ -1,0 +1,60 @@
+def extract_class_without_bodies(code, root):
+    class_chunks = []
+
+    def walk(node, parent_class=None):
+        if node.type in ("class_declaration", "interface_declaration", "enum_declaration"):
+            name_node = node.child_by_field_name("name")
+            name = code[name_node.start_byte:name_node.end_byte] if name_node else None
+
+            # Collect modifiers, annotations, extends, implements
+            modifiers, annotations, extends, implements = [], [], [], []
+            for child in node.children:
+                if child.type == "modifiers":
+                    modifiers = [code[c.start_byte:c.end_byte] for c in child.children]
+                elif child.type == "annotation":
+                    annotations.append(code[child.start_byte:child.end_byte])
+                elif child.type == "superclass":
+                    extends.append(code[child.start_byte:child.end_byte])
+                elif child.type == "super_interfaces":
+                    implements.append(code[child.start_byte:child.end_byte])
+
+            # --- Build class skeleton (without method bodies) ---
+            class_signature = code[node.start_byte:node.start_byte]  # placeholder
+            body_parts = []
+
+            for child in node.children:
+                if child.type == "field_declaration":
+                    body_parts.append(code[child.start_byte:child.end_byte])
+
+                elif child.type in ("method_declaration", "constructor_declaration"):
+                    # Extract method *header only* (exclude body)
+                    body_node = child.child_by_field_name("body")
+                    if body_node:
+                        body_parts.append(
+                            code[child.start_byte:body_node.start_byte] + ";"  # cut before body
+                        )
+                    else:
+                        body_parts.append(code[child.start_byte:child.end_byte])
+
+            # Reconstruct skeleton: class header + members
+            skeleton = f"class {name} {{\n" + "\n".join(body_parts) + "\n}"
+
+            class_chunks.append({
+                "type": node.type,
+                "name": name,
+                "modifiers": modifiers,
+                "extends": extends,
+                "implements": implements,
+                "annotations": annotations,
+                "skeleton": skeleton,
+                "start": node.start_point,
+                "end": node.end_point,
+                "parent_class": parent_class
+            })
+
+        # Recurse
+        for child in node.children:
+            walk(child, parent_class=name if node.type in ("class_declaration", "interface_declaration", "enum_declaration") else parent_class)
+
+    walk(root)
+    return class_chunks
