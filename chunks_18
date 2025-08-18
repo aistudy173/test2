@@ -1,0 +1,107 @@
+import os
+import json
+from pathlib import Path
+
+def extract_code_metadata(root, code, outdir="out"):
+    classes_meta = []
+    methods_meta = []
+
+    Path(outdir, "chunks", "classes").mkdir(parents=True, exist_ok=True)
+    Path(outdir, "chunks", "methods").mkdir(parents=True, exist_ok=True)
+    Path(outdir, "metadata").mkdir(parents=True, exist_ok=True)
+
+    lines = code.splitlines()
+
+    def get_source(start, end):
+        """Extract source code from byte/point positions"""
+        start_row, start_col = start
+        end_row, end_col = end
+        if start_row == end_row:
+            return lines[start_row][start_col:end_col]
+        out_lines = [lines[start_row][start_col:]] + \
+                    lines[start_row+1:end_row] + \
+                    [lines[end_row][:end_col]]
+        return "\n".join(out_lines)
+
+    def walk(node, parent_class=None, qualified_parent=None):
+        new_parent = parent_class
+        qualified_name = qualified_parent
+
+        if node.type in ("class_declaration", "interface_declaration", "enum_declaration"):
+            # Extract class name
+            name_node = node.child_by_field_name("name")
+            name = code[name_node.start_byte:name_node.end_byte]
+
+            # Qualified name (Outer.Inner)
+            qualified_name = name if not qualified_parent else f"{qualified_parent}.{name}"
+
+            # Full class source
+            class_src = get_source(node.start_point, node.end_point)
+
+            # Write class chunk
+            Path(outdir, "chunks", "classes", f"{qualified_name}.java.chunk").write_text(class_src, encoding="utf-8")
+
+            # Collect metadata
+            classes_meta.append({
+                "type": node.type,
+                "name": name,
+                "qualified_name": qualified_name,
+                "start": node.start_point,
+                "end": node.end_point,
+                "parent_class": parent_class
+            })
+
+            new_parent = name  # update parent for children
+
+        if node.type in ("method_declaration", "constructor_declaration"):
+            # Extract method/constructor name
+            name_node = node.child_by_field_name("name")
+            name = code[name_node.start_byte:name_node.end_byte] if name_node else "<init>"
+
+            # Extract source
+            method_src = get_source(node.start_point, node.end_point)
+
+            # Write method chunk
+            chunk_name = f"{qualified_name}.{name}.java.chunk" if qualified_name else f"{name}.java.chunk"
+            Path(outdir, "chunks", "methods", chunk_name).write_text(method_src, encoding="utf-8")
+
+            # Parameters
+            params = []
+            params_node = node.child_by_field_name("parameters")
+            if params_node:
+                for child in params_node.children:
+                    if child.type == "formal_parameter":
+                        type_node = child.child_by_field_name("type")
+                        var_node = child.child_by_field_name("name")
+                        ptype = code[type_node.start_byte:type_node.end_byte] if type_node else "?"
+                        pname = code[var_node.start_byte:var_node.end_byte] if var_node else "?"
+                        params.append({"name": pname, "type": ptype})
+
+            # Return type
+            return_type = None
+            rnode = node.child_by_field_name("type")
+            if rnode:
+                return_type = code[rnode.start_byte:rnode.end_byte]
+
+            methods_meta.append({
+                "type": node.type,
+                "name": name,
+                "qualified_class": qualified_name,
+                "start": node.start_point,
+                "end": node.end_point,
+                "parent_class": parent_class,
+                "return_type": return_type,
+                "params": params
+            })
+
+        # Recurse into children
+        for child in node.children:
+            walk(child, parent_class=new_parent, qualified_parent=qualified_name)
+
+    walk(root)
+
+    # Save metadata JSON
+    Path(outdir, "metadata", "classes.json").write_text(json.dumps(classes_meta, indent=2), encoding="utf-8")
+    Path(outdir, "metadata", "methods.json").write_text(json.dumps(methods_meta, indent=2), encoding="utf-8")
+
+    return {"classes": classes_meta, "methods": methods_meta}
