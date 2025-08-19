@@ -4,24 +4,18 @@ Java Metadata Hierarchical Extractor (Python, Tree-sitter version)
 This script uses `tree-sitter` with the Java grammar to parse Java source
 files and extract a hierarchical representation of types (classes,
 interfaces, enums, records), their fields, constructors, methods, and nested types.
-It can output either:
-- Markdown (human-readable docs)
-- JSON (all metadata, detailed, without code snippets)
-- Separate files per class/method
+It outputs a single JSON file with metadata only (no code text).
 
 Requirements:
 - Python 3.8+
 - pip install tree-sitter tree-sitter-java
 
 Usage:
-    python java_metadata_extractor.py input.java --mode markdown -o output.md
-    python java_metadata_extractor.py input.java --mode json -o output.json
-    python java_metadata_extractor.py input.java --mode files -d output_dir
+    python java_metadata_extractor.py input.java -o output.json
 
 """
 import argparse
 import sys
-import os
 import json
 from typing import List
 from tree_sitter import Language, Parser
@@ -149,67 +143,6 @@ def extract_types(tree, src: bytes) -> List[dict]:
     return types
 
 
-# ------------------------ Markdown Renderer ---------------------------
-
-def render_markdown(types: List[dict]) -> str:
-    lines: List[str] = []
-    for t in types:
-        lines.extend(render_type_md(t, level=2))
-    return "\n".join(lines)
-
-
-def render_type_md(t: dict, level: int = 2) -> List[str]:
-    lines: List[str] = []
-    header = '#' * level + f" {t['kind'].capitalize()}: {t['name']}"
-    lines.append(header)
-    if t.get('extends'):
-        lines.append(f"**Extends:** {t['extends']}")
-    if t.get('implements'):
-        lines.append(f"**Implements:** {', '.join(t['implements'])}")
-
-    if t.get('fields'):
-        lines.append('\n### Fields')
-        for f in t['fields']:
-            lines.append(f"- `{f['type']} {f['name']}`")
-
-    if t.get('methods'):
-        lines.append('\n### Methods')
-        for m in t['methods']:
-            params = ", ".join([f"{p['type']} {p['name']}" for p in m['parameters'] if p['name']])
-            sig = f"{m['return_type']} {m['name']}({params})"
-            lines.append(f"- `{sig}`")
-
-    if t.get('nested'):
-        lines.append('\n---\n')
-        for nt in t['nested']:
-            lines.extend(render_type_md(nt, level=level+1))
-
-    lines.append('\n')
-    return lines
-
-
-# ------------------------ File Renderer ---------------------------
-
-def write_files(types: List[dict], out_dir: str):
-    os.makedirs(out_dir, exist_ok=True)
-    for t in types:
-        file_path = os.path.join(out_dir, f"{t['name']}_{t['kind']}.txt")
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(f"{t['kind'].capitalize()} {t['name']}\n")
-            if t.get('fields'):
-                f.write("\nFields:\n")
-                f.writelines([f"- {fld['type']} {fld['name']}\n" for fld in t['fields']])
-            if t.get('methods'):
-                f.write("\nMethods:\n")
-                for m in t['methods']:
-                    params = ", ".join([f"{p['type']} {p['name']}" for p in m['parameters'] if p['name']])
-                    sig = f"{m['return_type']} {m['name']}({params})"
-                    f.write(f"- {sig}\n")
-        if t.get('nested'):
-            nested_dir = os.path.join(out_dir, f"{t['name']}_nested")
-            write_files(t['nested'], nested_dir)
-
-
 # ------------------------ Main processing -----------------------------
 
 def process_java_source(src: str) -> List[dict]:
@@ -218,38 +151,18 @@ def process_java_source(src: str) -> List[dict]:
 
 
 def main(argv):
-    parser_arg = argparse.ArgumentParser(description='Extract Java metadata and render in different formats (tree-sitter)')
+    parser_arg = argparse.ArgumentParser(description='Extract Java metadata and output JSON (tree-sitter)')
     parser_arg.add_argument('input', help='Path to Java source file')
-    parser_arg.add_argument('-o', '--output', help='Output file path (for markdown/json)')
-    parser_arg.add_argument('-d', '--dir', help='Output directory (for files mode)')
-    parser_arg.add_argument('--mode', choices=['markdown', 'json', 'files'], default='markdown', help='Output mode')
+    parser_arg.add_argument('-o', '--output', help='Output file path (JSON)', required=True)
     args = parser_arg.parse_args(argv)
 
     src = read_file(args.input)
     types = process_java_source(src)
 
-    if args.mode == 'markdown':
-        md = render_markdown(types)
-        if args.output:
-            with open(args.output, 'w', encoding='utf-8') as f:
-                f.write(md)
-            print(f"Wrote documentation to {args.output}")
-        else:
-            print(md)
-
-    elif args.mode == 'json':
-        metadata = {"types": types}
-        if args.output:
-            with open(args.output, 'w', encoding='utf-8') as f:
-                json.dump(metadata, f, indent=2)
-            print(f"Wrote JSON metadata to {args.output}")
-        else:
-            print(json.dumps(metadata, indent=2))
-
-    elif args.mode == 'files':
-        out_dir = args.dir or "output_classes"
-        write_files(types, out_dir)
-        print(f"Wrote class/method files to {out_dir}")
+    metadata = {"types": types}
+    with open(args.output, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Wrote JSON metadata to {args.output}")
 
 
 if __name__ == '__main__':
