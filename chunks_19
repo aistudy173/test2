@@ -1,0 +1,167 @@
+from tree_sitter import Language, Parser
+
+# -------------------------------
+# Setup: Tree-sitter Java
+# -------------------------------
+# Run once to build shared library:
+# Language.build_library(
+#     'build/my-languages.so',
+#     ['tree-sitter-java']
+# )
+JAVA_LANGUAGE = Language('build/my-languages.so', 'java')
+parser = Parser()
+parser.set_language(JAVA_LANGUAGE)
+
+
+# -------------------------------
+# Chunk splitting (line/char based)
+# -------------------------------
+def split_large_chunk(code, max_lines=50, max_chars=2000, overlap=5):
+    lines = code.splitlines()
+    chunks = []
+    start = 0
+    while start < len(lines):
+        end = min(start + max_lines, len(lines))
+        chunk_lines = lines[start:end]
+        chunk_text = "\n".join(chunk_lines)
+
+        if len(chunk_text) > max_chars:
+            for i in range(0, len(chunk_text), max_chars):
+                chunks.append(chunk_text[i:i + max_chars])
+        else:
+            chunks.append(chunk_text)
+
+        start += max_lines - overlap
+    return chunks
+
+
+# -------------------------------
+# Extractor
+# -------------------------------
+def extract_code_and_metadata(code: str, max_lines=50, max_chars=2000):
+    """
+    Extracts:
+      - Class chunks (split if too large)
+      - Method chunks (split if too large)
+      - Class JSON metadata (with fields, modifiers, inheritance, annotations)
+      - Method JSON metadata
+    """
+    tree = parser.parse(bytes(code, "utf8"))
+    root_node = tree.root_node
+
+    class_chunks = []
+    method_chunks = []
+    class_json = []
+    method_json = []
+
+    def node_text(node):
+        return code[node.start_byte:node.end_byte]
+
+    def walk(node, parent_class=None):
+        if node.type == "class_declaration":
+            # ---- Class ----
+            class_name, modifiers, annotations = None, [], []
+            extends, implements, fields = None, [], []
+
+            for child in node.children:
+                if child.type == "identifier":
+                    class_name = node_text(child)
+                elif child.type == "modifiers":
+                    modifiers = [node_text(m) for m in child.children if m.type != ","]
+                elif child.type == "marker_annotation":
+                    annotations.append(node_text(child))
+                elif child.type == "superclass":
+                    extends = node_text(child).replace("extends", "").strip()
+                elif child.type == "super_interfaces":
+                    implements = [node_text(i) for i in child.children if i.type == "type_identifier"]
+
+            class_code = node_text(node)
+
+            # Extract fields (variable_declaration)
+            for child in node.children:
+                if child.type == "field_declaration":
+                    field_modifiers = [node_text(m) for m in child.children if m.type == "modifier"]
+                    field_type = None
+                    field_names = []
+                    for c in child.children:
+                        if c.type == "type":
+                            field_type = node_text(c)
+                        elif c.type == "variable_declarator":
+                            field_names.append(node_text(c))
+                    for name in field_names:
+                        fields.append({
+                            "name": name,
+                            "type": field_type,
+                            "modifiers": field_modifiers
+                        })
+
+            # Metadata JSON
+            class_json.append({
+                "class_name": class_name,
+                "modifiers": modifiers,
+                "annotations": annotations,
+                "extends": extends,
+                "implements": implements,
+                "fields": fields,
+                "span": {"start": node.start_point, "end": node.end_point}
+            })
+
+            # Chunk splitting
+            subchunks = split_large_chunk(class_code, max_lines=max_lines, max_chars=max_chars)
+            for i, sc in enumerate(subchunks):
+                class_chunks.append({
+                    "class_name": class_name,
+                    "chunk_index": i,
+                    "code": sc
+                })
+
+            # Traverse children
+            for child in node.children:
+                walk(child, parent_class=class_name)
+
+        elif node.type == "method_declaration":
+            # ---- Method ----
+            method_name, params, return_type = None, [], None
+            modifiers, annotations = [], []
+
+            for child in node.children:
+                if child.type == "identifier":
+                    method_name = node_text(child)
+                elif child.type == "formal_parameters":
+                    params = [node_text(p) for p in child.children if p.type == "formal_parameter"]
+                elif child.type == "type":
+                    return_type = node_text(child)
+                elif child.type == "modifiers":
+                    modifiers = [node_text(m) for m in child.children if m.type != ","]
+                elif child.type == "marker_annotation":
+                    annotations.append(node_text(child))
+
+            method_code = node_text(node)
+
+            # Metadata JSON
+            method_json.append({
+                "class_name": parent_class,
+                "method_name": method_name,
+                "params": params,
+                "return_type": return_type,
+                "modifiers": modifiers,
+                "annotations": annotations,
+                "span": {"start": node.start_point, "end": node.end_point}
+            })
+
+            # Chunk splitting
+            subchunks = split_large_chunk(method_code, max_lines=max_lines, max_chars=max_chars)
+            for i, sc in enumerate(subchunks):
+                method_chunks.append({
+                    "class_name": parent_class,
+                    "method_name": method_name,
+                    "chunk_index": i,
+                    "code": sc
+                })
+
+        else:
+            for child in node.children:
+                walk(child, parent_class)
+
+    walk(root_node)
+    return class_chunks, method_chunks, class_json, method_json
