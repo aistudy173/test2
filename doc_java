@@ -1,0 +1,382 @@
+"""
+Java Metadata Hierarchical Extractor (Python)
+
+This script uses `javalang` to parse Java source files and extract a
+hierarchical representation of types (classes/interfaces/enums), their
+fields, constructors, methods, and nested types. Output is emitted in
+Markdown by default.
+
+Limitations / Notes:
+- javalang does not preserve JavaDoc blocks as structured nodes. This
+  script performs a best-effort association of JavaDoc comment blocks
+  (/** ... */) with the nearest following type/method/field by line
+  position.
+- This implementation focuses on structural metadata (modifiers, types,
+  signatures, annotations, thrown exceptions) and on producing a clean
+  Markdown hierarchy.
+
+Requirements:
+- Python 3.8+
+- pip install javalang
+
+Usage:
+    python java_metadata_extractor.py input.java -o output.md
+
+"""
+import argparse
+import re
+import sys
+from typing import List, Optional, Tuple
+
+try:
+    import javalang
+except Exception as e:
+    raise RuntimeError("This script requires the 'javalang' package. Install with: pip install javalang") from e
+
+
+# ----------------------------- Utilities -----------------------------
+
+def read_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def split_lines(src: str) -> List[str]:
+    return src.splitlines()
+
+
+# Find JavaDoc comment blocks and single-line comments with positions (start_line, end_line, text)
+JAVA_DOC_RE = re.compile(r"/\*\*([\s\S]*?)\*/", re.MULTILINE)
+LINE_COMMENT_RE = re.compile(r"//.*")
+
+
+def find_javadoc_blocks(src: str) -> List[Tuple[int, int, str]]:
+    """Return list of (start_line, end_line, text) for /** ... */ blocks."""
+    blocks: List[Tuple[int, int, str]] = []
+    for m in JAVA_DOC_RE.finditer(src):
+        start_offset = m.start()
+        end_offset = m.end()
+        start_line = src.count("\n", 0, start_offset) + 1
+        end_line = src.count("\n", 0, end_offset) + 1
+        text = m.group(0)
+        blocks.append((start_line, end_line, text.strip()))
+    return blocks
+
+
+def find_line_comments(src: str) -> List[Tuple[int, int, str]]:
+    """Return list of (line_no, line_no, text) for // comments."""
+    comments: List[Tuple[int, int, str]] = []
+    lines = split_lines(src)
+    for i, line in enumerate(lines, start=1):
+        m = LINE_COMMENT_RE.search(line)
+        if m:
+            comments.append((i, i, m.group(0).strip()))
+    return comments
+
+
+def find_preceding_comment_for_line(line: int, javadocs: List[Tuple[int,int,str]], max_gap: int = 2) -> Optional[str]:
+    """Find the nearest JavaDoc block that ends within `max_gap` lines before `line`.
+    Returns the comment text or None."""
+    candidate = None
+    for (s, e, text) in javadocs:
+        if e < line and (line - e) <= max_gap:
+            # choose the closest one
+            if candidate is None or e > candidate[0]:
+                candidate = (e, text)
+    return candidate[1] if candidate else None
+
+
+# ------------------------ AST Extraction helpers ----------------------
+
+
+def modifiers_to_str(modifiers) -> str:
+    if not modifiers:
+        return ""
+    return " ".join(sorted(modifiers))
+
+
+def format_type(node_type) -> str:
+    # node_type may be None or a Type node
+    if node_type is None:
+        return "void"
+    try:
+        # javalang types provide .name and .arguments sometimes
+        return str(node_type)
+    except Exception:
+        return getattr(node_type, 'name', str(node_type))
+
+
+def format_annotation_list(annotations) -> str:
+    if not annotations:
+        return ""
+    return ", ".join(["@" + (a.name if hasattr(a, 'name') else str(a)) for a in annotations])
+
+
+# ------------------------ Extractors ---------------------------------
+
+
+def extract_field(field_node, src_lines, javadocs) -> dict:
+    # field_node is javalang.tree.FieldDeclaration
+    decls = []
+    for d in field_node.declarators:
+        name = d.name
+        initializer = None
+        if getattr(d, 'initializer', None) is not None:
+            initializer = getattr(d.initializer, 'value', str(d.initializer))
+        decls.append({
+            'name': name,
+            'initializer': initializer,
+        })
+    field = {
+        'type': format_type(field_node.type),
+        'modifiers': modifiers_to_str(field_node.modifiers),
+        'annotations': format_annotation_list(field_node.annotations),
+        'declarators': decls,
+        'javadoc': None,
+    }
+    # try attach javadoc
+    pos = getattr(field_node, 'position', None)
+    if pos:
+        jd = find_preceding_comment_for_line(pos[0], javadocs)
+        field['javadoc'] = jd
+    return field
+
+
+def extract_method(method_node, src_lines, javadocs) -> dict:
+    params = []
+    for p in getattr(method_node, 'parameters', []) or []:
+        params.append({
+            'name': p.name,
+            'type': format_type(p.type),
+            'annotations': format_annotation_list(getattr(p, 'annotations', [])),
+        })
+
+    throws = []
+    if getattr(method_node, 'throws', None):
+        for t in method_node.throws:
+            # t may be a ReferenceType
+            throws.append(str(t))
+
+    method = {
+        'name': getattr(method_node, 'name', '<init>'),
+        'signature': str(method_node.declaration) if hasattr(method_node, 'declaration') else None,
+        'return_type': format_type(getattr(method_node, 'return_type', None)),
+        'modifiers': modifiers_to_str(getattr(method_node, 'modifiers', None)),
+        'annotations': format_annotation_list(getattr(method_node, 'annotations', [])),
+        'parameters': params,
+        'throws': throws,
+        'javadoc': None,
+    }
+    pos = getattr(method_node, 'position', None)
+    if pos:
+        jd = find_preceding_comment_for_line(pos[0], javadocs)
+        method['javadoc'] = jd
+    return method
+
+
+def extract_constructor(ctor_node, src_lines, javadocs) -> dict:
+    # Similar to method but with name = constructor name
+    params = []
+    for p in getattr(ctor_node, 'parameters', []) or []:
+        params.append({'name': p.name, 'type': format_type(p.type), 'annotations': format_annotation_list(getattr(p, 'annotations', []))})
+    throws = []
+    if getattr(ctor_node, 'throws', None):
+        for t in ctor_node.throws:
+            throws.append(str(t))
+    ctor = {
+        'name': getattr(ctor_node, 'name', '<init>'),
+        'modifiers': modifiers_to_str(getattr(ctor_node, 'modifiers', None)),
+        'annotations': format_annotation_list(getattr(ctor_node, 'annotations', [])),
+        'parameters': params,
+        'throws': throws,
+        'javadoc': None,
+    }
+    pos = getattr(ctor_node, 'position', None)
+    if pos:
+        ctor['javadoc'] = find_preceding_comment_for_line(pos[0], javadocs)
+    return ctor
+
+
+def extract_type(type_node, src_lines, javadocs) -> dict:
+    # type_node may be ClassDeclaration, InterfaceDeclaration, EnumDeclaration
+    kind = type(type_node).__name__  # ClassDeclaration, InterfaceDeclaration, EnumDeclaration
+    node = {
+        'name': getattr(type_node, 'name', '<anonymous>'),
+        'kind': kind.replace('Declaration', '').lower(),
+        'modifiers': modifiers_to_str(getattr(type_node, 'modifiers', None)),
+        'annotations': format_annotation_list(getattr(type_node, 'annotations', [])),
+        'extends': None,
+        'implements': [],
+        'javadoc': None,
+        'fields': [],
+        'constructors': [],
+        'methods': [],
+        'nested_types': [],
+    }
+
+    if getattr(type_node, 'extends', None):
+        # extends may be a Type or list
+        try:
+            node['extends'] = str(type_node.extends)
+        except Exception:
+            node['extends'] = getattr(type_node.extends, 'name', str(type_node.extends))
+
+    impl = getattr(type_node, 'implements', None)
+    if impl:
+        node['implements'] = [str(i) for i in impl]
+
+    pos = getattr(type_node, 'position', None)
+    if pos:
+        node['javadoc'] = find_preceding_comment_for_line(pos[0], javadocs)
+
+    # The body is a list of members for ClassDeclaration
+    body = getattr(type_node, 'body', []) or []
+    for member in body:
+        mtype = type(member).__name__
+        # FieldDeclaration
+        if mtype == 'FieldDeclaration':
+            node['fields'].append(extract_field(member, src_lines, javadocs))
+        elif mtype == 'ConstructorDeclaration':
+            node['constructors'].append(extract_constructor(member, src_lines, javadocs))
+        elif mtype == 'MethodDeclaration':
+            node['methods'].append(extract_method(member, src_lines, javadocs))
+        elif mtype in ('ClassDeclaration', 'InterfaceDeclaration', 'EnumDeclaration', 'AnnotationDeclaration'):
+            node['nested_types'].append(extract_type(member, src_lines, javadocs))
+        else:
+            # ignore other member types for now (initializers, etc.)
+            pass
+
+    return node
+
+
+# ------------------------ Markdown Renderer ---------------------------
+
+
+def render_markdown(package_name: Optional[str], types: List[dict]) -> str:
+    lines: List[str] = []
+    if package_name:
+        lines.append(f"# Package: {package_name}\n")
+    for t in types:
+        lines.extend(render_type_md(t, level=2))
+    return "\n".join(lines)
+
+
+def render_type_md(t: dict, level: int = 2) -> List[str]:
+    lines: List[str] = []
+    header = '#' * level + f" {t['kind'].capitalize()}: {t['name']}"
+    lines.append(header)
+    meta = []
+    if t.get('modifiers'):
+        meta.append(f"**Modifiers:** {t['modifiers']}")
+    if t.get('extends'):
+        meta.append(f"**Extends:** {t['extends']}")
+    if t.get('implements'):
+        meta.append(f"**Implements:** {', '.join(t['implements'])}")
+    if t.get('annotations'):
+        meta.append(f"**Annotations:** {t['annotations']}")
+    if meta:
+        lines.append("**Metadata:**  ")
+        for m in meta:
+            lines.append(m + "  ")
+
+    if t.get('javadoc'):
+        lines.append("**Description:**  ")
+        lines.append(quote_comment(t['javadoc']))
+
+    # Fields
+    if t.get('fields'):
+        lines.append('\n---\n')
+        lines.append('### Fields')
+        for f in t['fields']:
+            for d in f['declarators']:
+                decl = f"- `{f['modifiers']} {f['type']} {d['name']}`"
+                if d.get('initializer'):
+                    decl += f" = {d['initializer']}"
+                lines.append(decl + '  ')
+                if f.get('javadoc'):
+                    lines.append(quote_comment(f['javadoc']))
+
+    # Constructors
+    if t.get('constructors'):
+        lines.append('\n### Constructors')
+        for c in t['constructors']:
+            sig = f"- `{c['modifiers']} {c['name']}({', '.join([p['type'] + ' ' + p['name'] for p in c['parameters']])})`"
+            lines.append(sig + '  ')
+            if c.get('javadoc'):
+                lines.append(quote_comment(c['javadoc']))
+
+    # Methods
+    if t.get('methods'):
+        lines.append('\n### Methods')
+        for m in t['methods']:
+            params = ', '.join([p['type'] + ' ' + p['name'] for p in m['parameters']])
+            throws = ''
+            if m['throws']:
+                throws = ' throws ' + ', '.join(m['throws'])
+            sig = f"- `{m['modifiers']} {m['return_type']} {m['name']}({params}){throws}`"
+            lines.append(sig + '  ')
+            if m.get('javadoc'):
+                lines.append(quote_comment(m['javadoc']))
+
+    # Nested types
+    if t.get('nested_types'):
+        lines.append('\n---\n')
+        for nt in t['nested_types']:
+            lines.extend(render_type_md(nt, level=level+1))
+
+    lines.append('\n')
+    return lines
+
+
+def quote_comment(comment_text: str) -> str:
+    # Clean up leading stars and whitespace from a /** ... */ comment
+    if comment_text.startswith('/**'):
+        inner = comment_text[3:-2]
+        # Remove leading * on each line
+        lines = [re.sub(r"^\s*\*\s?", "", l).rstrip() for l in inner.splitlines()]
+        return '\n'.join(lines) + '\n'
+    else:
+        return comment_text + '\n'
+
+
+# ------------------------ Main processing -----------------------------
+
+
+def process_java_source(src: str) -> Tuple[Optional[str], List[dict]]:
+    """Parse Java source and return (package_name, list_of_type_dicts)"""
+    src_lines = split_lines(src)
+    javadocs = find_javadoc_blocks(src)
+    # parse
+    tree = javalang.parse.parse(src)
+    package_name = None
+    if getattr(tree, 'package', None):
+        package_name = tree.package.name
+
+    types: List[dict] = []
+    # top-level types
+    for t in getattr(tree, 'types', []) or []:
+        types.append(extract_type(t, src_lines, javadocs))
+
+    return package_name, types
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description='Extract Java metadata and render Markdown')
+    parser.add_argument('input', help='Path to Java source file')
+    parser.add_argument('-o', '--output', help='Output Markdown file (default stdout)')
+    args = parser.parse_args(argv)
+
+    src = read_file(args.input)
+    package_name, types = process_java_source(src)
+    md = render_markdown(package_name, types)
+
+    if args.output:
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(md)
+        print(f"Wrote documentation to {args.output}")
+    else:
+        print(md)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
