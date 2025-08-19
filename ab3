@@ -1,0 +1,28 @@
+#### Func6 : save embeddings to vector db
+def save_to_vector_db(metadata_list, code_dir):
+    # Load embedding model
+    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+
+    # Initialize Chroma client
+    client = chromadb.PersistentClient(path=VECTOR_DB_DIR, settings=Settings())
+
+    collection_name = "java_chunks"
+    # Create collection if it doesn't exist
+    if collection_name not in [c.name for c in client.list_collections()]:
+        collection = client.create_collection(name=collection_name)
+    else:
+        collection = client.get_collection(name=collection_name)
+
+    # Add embeddings
+    for meta in metadata_list:
+        chunk_path = os.path.join(code_dir, meta["chunk_name"])
+        with open(chunk_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        embedding = model.encode(text).tolist()
+        collection.add(
+            ids=[meta["chunk_name"]],
+            metadatas=[meta],
+            embeddings=[embedding],
+            documents=[text]
+        )
+    print(f"Saved {len(metadata_list)} embeddings to vector DB")
