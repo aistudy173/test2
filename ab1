@@ -6,7 +6,7 @@ files and extract a hierarchical representation of types (classes,
 interfaces, enums, records), their fields, constructors, methods, and nested types.
 It can output either:
 - Markdown (human-readable docs)
-- JSON (all metadata)
+- JSON (all metadata, detailed, without code snippets)
 - Separate files per class/method
 
 Requirements:
@@ -50,10 +50,20 @@ def node_text(src: bytes, node) -> str:
     return src[node.start_byte:node.end_byte].decode('utf-8')
 
 
+def extract_parameters(param_node, src: bytes) -> dict:
+    """Extract parameter type and name."""
+    param_info = {"type": None, "name": None}
+    for child in param_node.children:
+        if child.type == "type":
+            param_info["type"] = node_text(src, child)
+        elif child.type == "identifier":
+            param_info["name"] = node_text(src, child)
+    return param_info
+
+
 def extract_method(node, src: bytes) -> dict:
     """Extract return type, name, and parameters of a method."""
     method_info = {
-        "signature": node_text(src, node),
         "name": None,
         "return_type": None,
         "parameters": []
@@ -67,9 +77,22 @@ def extract_method(node, src: bytes) -> dict:
         elif child.type == "formal_parameters":
             for param in child.children:
                 if param.type == "formal_parameter":
-                    method_info["parameters"].append(node_text(src, param))
+                    method_info["parameters"].append(extract_parameters(param, src))
 
     return method_info
+
+
+def extract_field(member, src: bytes) -> dict:
+    """Extract field metadata with type and name."""
+    field_type, field_name = None, None
+    for fchild in member.children:
+        if fchild.type == "type":
+            field_type = node_text(src, fchild)
+        elif fchild.type == "variable_declarator":
+            for sub in fchild.children:
+                if sub.type == "identifier":
+                    field_name = node_text(src, sub)
+    return {"name": field_name, "type": field_type}
 
 
 def extract_type(node, src: bytes) -> dict:
@@ -98,7 +121,9 @@ def extract_type(node, src: bytes) -> dict:
         elif child.type in ("class_body", "interface_body", "enum_body", "record_body"):
             for member in child.children:
                 if member.type == "field_declaration":
-                    fields.append(node_text(src, member))
+                    field_meta = extract_field(member, src)
+                    if field_meta["name"]:
+                        fields.append(field_meta)
                 elif member.type == "method_declaration":
                     methods.append(extract_method(member, src))
                 elif member.type in kind_map:
@@ -145,12 +170,13 @@ def render_type_md(t: dict, level: int = 2) -> List[str]:
     if t.get('fields'):
         lines.append('\n### Fields')
         for f in t['fields']:
-            lines.append(f"- `{f}`")
+            lines.append(f"- `{f['type']} {f['name']}`")
 
     if t.get('methods'):
         lines.append('\n### Methods')
         for m in t['methods']:
-            sig = m['signature']
+            params = ", ".join([f"{p['type']} {p['name']}" for p in m['parameters'] if p['name']])
+            sig = f"{m['return_type']} {m['name']}({params})"
             lines.append(f"- `{sig}`")
 
     if t.get('nested'):
@@ -172,11 +198,13 @@ def write_files(types: List[dict], out_dir: str):
             f.write(f"{t['kind'].capitalize()} {t['name']}\n")
             if t.get('fields'):
                 f.write("\nFields:\n")
-                f.writelines([f"- {fld}\n" for fld in t['fields']])
+                f.writelines([f"- {fld['type']} {fld['name']}\n" for fld in t['fields']])
             if t.get('methods'):
                 f.write("\nMethods:\n")
                 for m in t['methods']:
-                    f.write(f"- {m['signature']}\n")
+                    params = ", ".join([f"{p['type']} {p['name']}" for p in m['parameters'] if p['name']])
+                    sig = f"{m['return_type']} {m['name']}({params})"
+                    f.write(f"- {sig}\n")
         if t.get('nested'):
             nested_dir = os.path.join(out_dir, f"{t['name']}_nested")
             write_files(t['nested'], nested_dir)
@@ -210,12 +238,13 @@ def main(argv):
             print(md)
 
     elif args.mode == 'json':
+        metadata = {"types": types}
         if args.output:
             with open(args.output, 'w', encoding='utf-8') as f:
-                json.dump(types, f, indent=2)
+                json.dump(metadata, f, indent=2)
             print(f"Wrote JSON metadata to {args.output}")
         else:
-            print(json.dumps(types, indent=2))
+            print(json.dumps(metadata, indent=2))
 
     elif args.mode == 'files':
         out_dir = args.dir or "output_classes"
