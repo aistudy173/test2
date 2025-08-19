@@ -1,0 +1,53 @@
+        snippet = "\n".join(code[start_line:end_line+1])
+        chunk_counter += 1
+
+        if metadata["parent_class"]:
+            base_name = f"{chunk_counter:03d}_{safe_filename(metadata['parent_class'])}.{safe_filename(metadata['name'])}"
+        else:
+            base_name = f"{chunk_counter:03d}_{safe_filename(metadata['name'])}"
+
+        # ---- SPLIT if snippet is too large ----
+        if len(snippet) > MAX_CHARS:
+            # break into sub-chunks by line
+            snippet_lines = snippet.splitlines()
+            sub_index = 1
+            for i in range(0, len(snippet_lines), MAX_CHARS // 2):  
+                # use half MAX_CHARS as approx line split (safer than cutting mid-line)
+                sub_snippet = "\n".join(snippet_lines[i:i + (MAX_CHARS // 2)])
+                chunk_name = f"{base_name}_part{sub_index}.java"
+                out_path = os.path.join(output_dir, chunk_name)
+
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(sub_snippet)
+                print(f"File saved: {out_path}")   
+
+                final_metadata.append({
+                    "chunk_name": chunk_name,
+                    "type": metadata["type"],
+                    "name": metadata["name"],
+                    "start": metadata["start"],
+                    "end": metadata["end"],
+                    "parent_class": metadata["parent_class"],
+                    "lines": len(sub_snippet.splitlines()),
+                    "size_chars": len(sub_snippet)
+                })
+                sub_index += 1
+        else:
+            # normal case (no splitting needed)
+            chunk_name = f"{base_name}.java"
+            out_path = os.path.join(output_dir, chunk_name)
+
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(snippet)
+            print(f"File saved: {out_path}")     
+
+            final_metadata.append({
+                "chunk_name": chunk_name,
+                "type": metadata["type"],
+                "name": metadata["name"],
+                "start": metadata["start"],
+                "end": metadata["end"],
+                "parent_class": metadata["parent_class"],
+                "lines": len(snippet.splitlines()),
+                "size_chars": len(snippet)
+            })
