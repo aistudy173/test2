@@ -1,3 +1,23 @@
+def summarize_class_text(class_name, class_code):
+    prompt = f"""
+You are a senior software architect. Your task is to write a **high-level documentation summary**
+for the Java class `{class_name}` based on the provided source code.
+
+### Instructions:
+- Identify the **purpose** of the class in the overall system.
+- Summarize its **main responsibilities** in plain language.
+- Highlight **key features** (important fields, methods, or logic) only at a conceptual level.
+- Explain how it **interacts with other classes or services** (dependencies, collaborations).
+- Mention any **design patterns or architectural role** (e.g., Controller, Manager, Utility).
+- Keep the summary **concise (2–4 paragraphs)** and avoid line-by-line explanations.
+- Write in a **professional documentation style**, suitable for engineers reading system docs.
+
+### Source Code for {class_name}:
+{class_code}
+    """
+    return prompt
+
+
 import os, json
 from pathlib import Path
 
