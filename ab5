@@ -1,0 +1,68 @@
+import json, os
+from transformers import pipeline
+
+# ---- CONFIG ----
+METADATA_FILE = "chunks_metadata.json"
+CHUNKS_DIR = "chunks"
+OUTPUT_DOCS_FILE = "class_docs.json"
+MAX_TOKENS = 4000   # adjust for your LLM context
+llm = pipeline("text-generation", model="gpt-4")  # Or OpenAI API wrapper
+
+
+def count_tokens(text: str) -> int:
+    return len(text.split())
+
+def summarize_text(text: str, prompt: str) -> str:
+    input_text = prompt + "\n\n" + text
+    output = llm(input_text, max_length=500)[0]["generated_text"]
+    return output.strip()
+
+def generate_class_summary(class_name, part_files):
+    """Generate high-level summary for a class."""
+    parts = []
+    for pf in part_files:
+        with open(os.path.join(CHUNKS_DIR, pf), "r", encoding="utf-8") as f:
+            parts.append(f.read())
+    combined = "\n".join(parts)
+
+    if count_tokens(combined) < MAX_TOKENS:
+        return summarize_text(combined, f"Summarize the purpose and responsibilities of class {class_name}")
+    else:
+        # map
+        partial_summaries = []
+        for i, part in enumerate(parts, 1):
+            summary = summarize_text(part, f"Summarize part {i} of class {class_name}")
+            partial_summaries.append(summary)
+        # reduce
+        merged = "\n".join(partial_summaries)
+        return summarize_text(merged, f"Merge the summaries into one high-level documentation for class {class_name}")
+
+def create_high_level_docs():
+    with open(METADATA_FILE, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    # filter top-level classes
+    class_chunks = [m for m in metadata if m["type"] == "class_declaration" and m["parent_class"] is None]
+
+    # group parts per class
+    class_groups = {}
+    for meta in class_chunks:
+        cname = meta["name"]
+        if cname not in class_groups:
+            class_groups[cname] = []
+        class_groups[cname].append(meta["chunk_name"])
+
+    # generate summaries
+    class_docs = {}
+    for cname, parts in class_groups.items():
+        print(f"📘 Documenting class: {cname} ({len(parts)} parts)")
+        class_docs[cname] = generate_class_summary(cname, sorted(parts))
+
+    # save
+    with open(OUTPUT_DOCS_FILE, "w", encoding="utf-8") as f:
+        json.dump(class_docs, f, indent=2)
+    print(f"✅ High-level documentation saved to {OUTPUT_DOCS_FILE}")
+
+
+if __name__ == "__main__":
+    create_high_level_docs()
