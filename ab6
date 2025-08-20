@@ -1,3 +1,21 @@
+######## FuncX : build dependency graph
+def build_dependency_graph(metadata_list):
+    graph = {}
+    for meta in metadata_list:
+        if meta["type"] in ("class_declaration", "interface_declaration", "enum_declaration"):
+            class_name = meta["name"]
+            deps = []
+
+            if meta["dependencies"]["extends"]:
+                deps.append(meta["dependencies"]["extends"])
+            deps.extend(meta["dependencies"]["implements"])
+            deps.extend(meta["dependencies"]["imports"])
+
+            graph[class_name] = deps
+    return graph
+
+
+
 def summarize_class_text(class_name, class_code):
     prompt = f"""
 You are a senior software architect. Your task is to write a **high-level documentation summary**
