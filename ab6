@@ -1,0 +1,70 @@
+import os, json
+from pathlib import Path
+
+DOCS_DIR = "docs/classes"
+os.makedirs(DOCS_DIR, exist_ok=True)
+
+# === Dummy LLM wrapper (replace with OpenAI/HF call) ===
+def summarize_text(text, prompt):
+    """Stub for LLM summarization"""
+    return f"Summary for: {prompt}\n\n{text[:200]}..."
+
+
+def build_high_level_docs(metadata_file, chunks_dir):
+    with open(metadata_file, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    # group chunks by top-level class
+    classes = {}
+    for m in metadata:
+        if m["type"] in ("class_declaration", "interface_declaration") and m["parent_class"] is None:
+            cls_name = m["name"]
+            if cls_name not in classes:
+                classes[cls_name] = []
+            classes[cls_name].append(m["chunk_name"])
+
+    docs = {}
+
+    for cls_name, parts in classes.items():
+        part_summaries = []
+        for part in sorted(parts):  # ensure order (_part1, _part2...)
+            with open(os.path.join(chunks_dir, part), "r", encoding="utf-8") as f:
+                code_text = f.read()
+
+            # 🔹 Summarize each chunk separately
+            prompt = f"Summarize this part of class {cls_name}:"
+            part_summary = summarize_text(code_text, prompt)
+
+            # save part-level .md
+            part_md = Path(DOCS_DIR) / f"{part.replace('.java', '.md')}"
+            with open(part_md, "w", encoding="utf-8") as f:
+                f.write(f"# {cls_name} ({part})\n\n{part_summary}\n")
+
+            part_summaries.append(part_summary)
+
+        # 🔹 Merge summaries into final class-level summary
+        combined = "\n".join(part_summaries)
+        final_prompt = f"Combine these part summaries into a high-level overview for class {cls_name}:"
+        class_summary = summarize_text(combined, final_prompt)
+
+        # save final class-level .md
+        final_md = Path(DOCS_DIR) / f"{cls_name}.md"
+        with open(final_md, "w", encoding="utf-8") as f:
+            f.write(f"# {cls_name}\n\n{class_summary}\n")
+
+        # prepare skeleton for methods
+        methods = [
+            m for m in metadata
+            if m["parent_class"] == cls_name and m["type"] == "method_declaration"
+        ]
+        docs[cls_name] = {
+            "summary": class_summary,
+            "parts": part_summaries,
+            "methods": [{"name": m["name"], "doc": ""} for m in methods]
+        }
+
+    # Save skeleton
+    with open("docs/class_docs.json", "w", encoding="utf-8") as f:
+        json.dump(docs, f, indent=2)
+
+    print(f"✅ Created {len(classes)} high-level class docs + part-level docs + method skeletons")
