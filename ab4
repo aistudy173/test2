@@ -1,0 +1,55 @@
+######## Func7 : Save embeddings in FAISS
+def save_to_faiss(metadata_list, code_dir):
+    docs, ids = [], []
+    for meta in metadata_list:
+        chunk_path = os.path.join(code_dir, meta["chunk_name"])
+        with open(chunk_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        docs.append(text)
+        ids.append(meta["chunk_name"])
+
+    embeddings = embedding_model.encode(docs)
+    embeddings = np.array(embeddings).astype("float32")
+
+    # Create FAISS index
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
+
+    # Save FAISS index + metadata mapping
+    faiss.write_index(index, FAISS_INDEX_FILE)
+    with open(FAISS_METADATA_FILE, "w", encoding="utf-8") as f:
+        json.dump({"ids": ids, "metadata": metadata_list}, f, indent=2)
+
+    print(f"Saved {len(ids)} chunks into FAISS index ({FAISS_INDEX_FILE}) + metadata ({FAISS_METADATA_FILE})")
+
+######## Func8 : Query FAISS
+def query_faiss(query, top_k=3):
+    index = faiss.read_index(FAISS_INDEX_FILE)
+    with open(FAISS_METADATA_FILE, "r", encoding="utf-8") as f:
+        meta_store = json.load(f)
+    ids = meta_store["ids"]
+    metadata_list = meta_store["metadata"]
+
+    q_emb = embedding_model.encode([query]).astype("float32")
+    D, I = index.search(q_emb, top_k)
+    results = []
+    for idx in I[0]:
+        results.append({
+            "id": ids[idx],
+            "metadata": metadata_list[idx]
+        })
+    return results
+
+#### MAIN
+if __name__ == "__main__":
+    code = read_java_file(INPUT_FILE)
+    if os.path.exists(OUTPUT_DIR):
+        shutil.rmtree(OUTPUT_DIR)
+
+    metadata_list = save_chunks(code, OUTPUT_DIR)
+    save_to_faiss(metadata_list, OUTPUT_DIR)
+
+    # 🔎 Example search
+    hits = query_faiss("main method", top_k=2)
+    print("Query results:", hits)
