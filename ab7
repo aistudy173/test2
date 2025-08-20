@@ -1,0 +1,60 @@
+######## Func9 : Build dependency graph
+def build_dependency_graph(metadata_list):
+    """
+    Build a mapping of class -> dependencies (extends, implements, imports).
+    Also embed dependencies back into metadata_list entries.
+    """
+    dep_graph = {}
+
+    for meta in metadata_list:
+        if meta["type"] in ("class_declaration", "interface_declaration", "enum_declaration"):
+            class_name = meta["name"]
+            deps = meta.get("dependencies", {})
+
+            # Flatten dependencies into a list
+            class_deps = []
+            if deps.get("extends"):
+                class_deps.append(deps["extends"])
+            if deps.get("implements"):
+                class_deps.extend(deps["implements"])
+            if deps.get("imports"):
+                class_deps.extend(deps["imports"])
+
+            dep_graph[class_name] = class_deps
+
+            # Make sure metadata itself has dependencies field
+            meta["dependencies"] = {
+                "extends": deps.get("extends"),
+                "implements": deps.get("implements", []),
+                "imports": deps.get("imports", [])
+            }
+
+    return dep_graph
+
+
+######## Func10 : Save dependency graph
+def save_dependency_graph(dep_graph, out_file="dependencies.json"):
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(dep_graph, f, indent=2)
+    print(f"Dependency graph saved to {out_file}")
+
+
+
+
+
+if __name__ == "__main__":
+    code = read_java_file(INPUT_FILE)
+    if os.path.exists(OUTPUT_DIR):
+        shutil.rmtree(OUTPUT_DIR)
+
+    metadata_list = save_chunks(code, OUTPUT_DIR)
+
+    # Build and save dependency graph
+    dep_graph = build_dependency_graph(metadata_list)
+    save_dependency_graph(dep_graph)
+
+    # Save updated metadata (with dependencies included)
+    with open(METADATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(metadata_list, f, indent=2)
+
+    print("Updated metadata with dependencies included.")
